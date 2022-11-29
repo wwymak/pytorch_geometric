@@ -1,5 +1,5 @@
-from .graph_generator import GraphGenerator
+from .ba_graph import BAGraph
+from .motif import Motif
 
-__all__ = [
-    "GraphGenerator"
-]
+__all__ = ['BAGraph', 'Motif']
+
