@@ -50,4 +50,3 @@ class GraphGenerator:
         self.edge_index = torch.cat(edge_indices, dim=1)
         self.edge_label = torch.cat(edge_labels, dim=0)
         self.node_label = torch.cat(node_labels, dim=0)
-
