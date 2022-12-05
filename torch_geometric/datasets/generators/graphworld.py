@@ -52,3 +52,7 @@ class GraphWorld(GraphGenerator):
                     expl_mask=self.expl_mask, edge_label=self.edge_label)
 
         return data
+
+    def generate_graphs(self):
+        pass
+    # generate muliple graphs as per paper using p_q ration
