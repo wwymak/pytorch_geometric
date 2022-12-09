@@ -336,7 +336,7 @@ class GeneratorConfigSampler:
             spec.min_val != spec.max_val]
         if len(valid_params) == 0:
             return None
-        return random.choice(valid_params)
+        return np.random.choice(valid_params)
 
     def __init__(self, param_sampler_specs):
         self._param_sampler_specs = {spec.name: spec for spec in param_sampler_specs}
@@ -362,35 +362,70 @@ class GeneratorConfigSampler:
         return config, marginal_param, fixed_params
 
 
-class GraphWorld(GraphGenerator):
-    def __init__(
-            self,
-            motif: Callable,
-            block_sizes: Union[List[int], torch.Tensor],
-            edge_probs: Union[List[List[float]], torch.Tensor],
-            directed: bool = False,
-            out_degs=None,
-            feature_center_distance=0.0,
-            feature_dim=0,
-            num_feature_groups=1,
-            # feature_group_match_type=MatchType.RANDOM,
-            feature_cluster_variance=1.0,
-            edge_feature_dim=0,
-            edge_center_distance=0.0,
-            edge_cluster_variance=1.0,
-            normalize_features=True,
-            num_nodes: int = 300,
-            p_to_q_min=1,
-            p_to_q_max=64,
-            seed=None,
-    ):
-        # self.num_edges = num_edges
-        # self.num_motifs = num_motifs
-        self.block_sizes = block_sizes
-        self.edge_probs = edge_probs
-        self.directed = directed
-        super().__init__(num_nodes=num_nodes, motif=motif, seed=seed)
+class GraphWorld:
+    generator_params = {
+        'p_to_q_ratio': {
+            'min': 1.,
+            'max': 16.,
+            'param_type': float,
+        },
+        'avg_degree': {
+            'min': 1,
+            'max': 20.,
+            'param_type': float,
+        },
+        'feature_center_distance': {
+            'min': 0.,
+            'max': 5.,
+            'param_type': float,
+        },
+        'num_nodes': {
+            'min': 128,
+            'max': 512,
+            'param_type': int,
+        },
+        'feature_dim': {
+            'min': 1,
+            'max': 64,
+            'param_type': int,
+        },
+        'edge_feature_dim': {
+            'min': 2,
+            'max': 2,
+            'param_type': int,
+        },
+        'edge_center_distance': {
+            'min': 1,
+            'max': 64,
+            'param_type': float,
+        },
+        'num_clusters': {
+            'min': 2,
+            'max': 6,
+            'param_type': int,
+        },
+        'cluster_size_slope': {
+            'min': 0.,
+            'max': 1.,
+            'param_type': float,
+        },
+        'power_exponent': {
+            'min': 0.2,
+            'max': 1.,
+            'param_type': float,
+        },
+    }
 
+    def __init__(
+        self,
+        generator_params={},
+        num_samples=100,
+        seed=None,
+    ):
+        self.num_samples = num_samples
+        self.generator_params = {**self.generator_params, **generator_params}
+        if seed:
+            np.random.seed(seed)
 
 
     # Helper function to create the "PropMat" matrix for the SBM model (square
@@ -401,28 +436,37 @@ class GraphWorld(GraphGenerator):
         np.fill_diagonal(prop_mat, p_to_q_ratio)
         return prop_mat
 
-    def generate_config(self, generator_params, num_samples):
+    def generate_config(self, generator_params):
         config = {}
         for param_name, spec in generator_params.items():
-            min_value = spec['min_value']
-            max_value = spec['max_value']
+            min_value = spec['min']
+            max_value = spec['max']
             param_type = spec['param_type']
 
             if param_type == 'int':
                 config[param_name] = np.random.randint(
-                    low=min_value,high=max_value, size=num_samples)
+                    low=min_value,high=max_value, size=self.num_samples)
             elif param_type=='float':
                 config[param_name] = (np.random.random_sample(
-                    size=num_samples) * (max_value - min_value)
+                    size=self.num_samples) * (max_value - min_value)
                                       + min_value)
         if 'p_to_q_ratio' in config.keys():
             config['edge_probs'] = self.make_prop_matrix(config.pop('p_to_q_ratio'))
         else:
             # double check if the default value of 1 is correct
             config['edge_probs'] = self.make_prop_matrix(1)
-    def generate_graphs(self, p_q_ratio_min, p_q_ratio_max):
+        return config
+
+    def generate_graphs(self):
         configs = self.generate_config()
         for config in configs:
-            sbm = StochasticBlockModelGraph()
-        yield {**config, 'data':sbm}
+            sbm = StochasticBlockModelGraph(**config)
+            yield {**config, 'data': sbm}
     # generate muliple graphs as per paper using p_q ration
+
+
+if __name__== "__main__":
+    gw = GraphWorld(num_samples=2)
+    for graph in gw.generate_graphs():
+        print(graph.__dir__())
+        print('here')
