@@ -1,5 +1,5 @@
 import os.path as osp
-from typing import Callable, List, Optional, Union
+from typing import Callable, List, Optional, Union, Dict
 
 import torch
 import enum
@@ -14,7 +14,7 @@ import numpy as np
 
 
 class MatchType(enum.Enum):
-    """Indicates type of feature/graph membership matching to do.
+    r"""Indicates type of feature/graph membership matching to do.
     RANDOM: feature memberships are generated randomly.
     NESTED: for # feature groups >= # graph groups. Each feature cluster is a
       sub-cluster of a graph cluster. Multiplicity of sub-clusters per
@@ -31,26 +31,26 @@ class MatchType(enum.Enum):
 class StochasticBlockModelGraph(GraphGenerator):
     def __init__(
         self,
-            motif: Callable = None,
-            block_sizes: Union[List[int], torch.Tensor] = None,
-            edge_probs: Union[List[List[float]], torch.Tensor] = None,
-            num_clusters=1,
-            directed: bool = False,
-            avg_degree=2.,
-            feature_center_variance=0.0,
-            feature_dim=0,
-            num_feature_groups=1,
-            # feature_group_match_type=MatchType.RANDOM,
-            feature_cluster_variance=1.0,
-            cluster_size_slope=1.0,
-            edge_feature_dim=0,
-            edge_center_distance=0.0,
-            edge_cluster_variance=1.0,
-            normalize_features=True,
-            num_nodes: int = 300,
-            seed: int = None,
+        block_sizes: Union[List[int], torch.Tensor] = None,
+        edge_probs: Union[List[List[float]], torch.Tensor] = None,
+        num_clusters=1,
+        directed: bool = False,
+        avg_degree=2.,
+        feature_center_variance=0.0,
+        feature_dim=0,
+        num_feature_groups=1,
+        # feature_group_match_type=MatchType.RANDOM,
+        feature_cluster_variance=1.0,
+        cluster_size_slope=1.0,
+        edge_feature_dim=0,
+        edge_center_distance=0.0,
+        edge_cluster_variance=1.0,
+        normalize_features=True,
+        num_nodes: int = 300,
+        pi = None,
+        seed: int = None,
 
-            **kwargs
+        **kwargs
     ):
         self.edge_probs = edge_probs
         self.block_sizes = block_sizes
@@ -58,19 +58,21 @@ class StochasticBlockModelGraph(GraphGenerator):
         self.avg_degree = avg_degree
         self.feature_dim = feature_dim
         self.feature_center_variance = feature_center_variance #
+        self.feature_cluster_variance = feature_cluster_variance #
         self.edge_feature_dim = edge_feature_dim
         self.edge_center_distance = edge_center_distance
         self.directed = directed
         self.cluster_size_slope = cluster_size_slope
         self.normalize_features = normalize_features
+        self.num_nodes = num_nodes
         self.x = None
+        self.pi = pi
+        self.graph_memberships = self._generate_node_memberships()
         super().__init__()
 
     def generate_node_features(
             self,
-            graph_memberships=[1,2,3], # TODO
             match_type=MatchType.RANDOM,
-            cluster_var=1.0,
     ) -> torch.Tensor:
         r"""
 
@@ -85,14 +87,13 @@ class StochasticBlockModelGraph(GraphGenerator):
 
         """
         feature_memberships = self._generate_feature_memberships(
-            graph_memberships=graph_memberships,
             num_groups=self.num_clusters,
             match_type=match_type)
 
         # Get centers
         centers = []
         center_cov = np.identity(self.feature_dim) * self.feature_center_variance
-        cluster_cov = np.identity(self.feature_dim) * cluster_var
+        cluster_cov = np.identity(self.feature_dim) * self.feature_cluster_variance
         for _ in range(self.num_clusters):
             center = np.random.multivariate_normal(
                 np.zeros(self.feature_dim), center_cov, 1)[0]
@@ -109,10 +110,7 @@ class StochasticBlockModelGraph(GraphGenerator):
 
     def generate_edge_features(
             self,
-            feature_dim: int,
-            graph_memberships: List,
             center_distance: float =0.0,
-            cluster_variance: float =1.0
     ) -> torch.Tensor:
         r"""
             Generates edge feature distribution via inter-class vs intra-class.
@@ -126,23 +124,22 @@ class StochasticBlockModelGraph(GraphGenerator):
             center_distance: (float) per-dimension distance between the intra-class and
               inter-class means. Increasing this makes the edge feature signal stronger.
             cluster_variance: (float) variance of clusters around their centers.
-  """
-        center0 = np.zeros(shape=(feature_dim,))
-        center1 = np.ones(shape=(feature_dim,)) * center_distance
-        covariance = np.identity(feature_dim) * cluster_variance
-        edge_features = {}
-        for idx in self.edge_index.shape[1]:
+        """
+        center0 = np.zeros(shape=(self.feature_dim,))
+        center1 = np.ones(shape=(self.feature_dim,)) * center_distance
+        covariance = np.identity(self.feature_dim) * self.feature_cluster_variance
+        edge_features = []
+        for idx in range(self.edge_index.shape[1]):
             vertex1 = self.edge_index[:, idx][0]
             vertex2 = self.edge_index[:, idx][1]
-            edge_tuple = tuple(sorted((vertex1, vertex2)))
-            if (graph_memberships[vertex1] ==
-                    graph_memberships[vertex2]):
+            if (self.graph_memberships[vertex1] ==
+                    self.graph_memberships[vertex2]):
                 center = center1
             else:
                 center = center0
-            edge_features[edge_tuple] = np.random.multivariate_normal(
-                center, covariance, 1)[0]
-        return edge_features
+            edge_features.append(np.random.multivariate_normal(
+                center, covariance, 1)[0])
+        return torch.tensor(edge_features)
 
     def __call__(self) -> Data:
         self.edge_index = stochastic_blockmodel_graph(
@@ -152,14 +149,13 @@ class StochasticBlockModelGraph(GraphGenerator):
         x = self.generate_node_features()
         edge_attr = self.generate_edge_features()
 
-        data = Data(x=x, edge_index=self.edge_index, y=self.node_label,
+        data = Data(x=x, edge_index=self.edge_index, #y=self.node_label,
                     edge_attr=edge_attr)
 
         return data
 
     def _generate_feature_memberships(
             self,
-            graph_memberships,
             num_groups=None,
             match_type=MatchType.RANDOM):
         """Generates a feature membership assignment.
@@ -174,7 +170,7 @@ class StochasticBlockModelGraph(GraphGenerator):
         # Parameter checks
         if num_groups is not None and num_groups == 0:
             raise ValueError("argument num_groups must be None or positive")
-        graph_num_groups = len(set(graph_memberships))
+        graph_num_groups = len(set(self.graph_memberships))
         if num_groups is None:
             num_groups = graph_num_groups
 
@@ -191,7 +187,7 @@ class StochasticBlockModelGraph(GraphGenerator):
             for feature_cluster, graph_cluster_list in nesting_map.items():
                 for cluster in graph_cluster_list:
                     reverse_nesting_map[cluster] = feature_cluster
-            for cluster in graph_memberships:
+            for cluster in self.graph_memberships:
                 memberships.append(reverse_nesting_map[cluster])
         elif match_type == MatchType.NESTED:
             if num_groups < graph_num_groups:
@@ -205,18 +201,18 @@ class StochasticBlockModelGraph(GraphGenerator):
                 num_feature_groups = len(sorted_feature_cluster_ids)
                 feature_pi = np.ones(num_feature_groups) / num_feature_groups
                 num_graph_cluster_nodes = np.sum(
-                    [i == graph_cluster_id for i in graph_memberships])
+                    [i == graph_cluster_id for i in self.graph_memberships])
                 sub_memberships = self._generate_node_memberships(num_graph_cluster_nodes,
                                                            feature_pi)
                 sub_memberships = [sorted_feature_cluster_ids[i] for i in sub_memberships]
                 memberships.extend(sub_memberships)
         else:  # MatchType.RANDOM
-            memberships = np.random.choice(range(num_groups), size=len(graph_memberships))
+            memberships = np.random.choice(range(num_groups), size=len(self.graph_memberships))
         return np.array(sorted(memberships))
 
 
     def _get_nesting_map(self, large_k, small_k):
-        """Given two group sizes, computes a "nesting map" between groups.
+        r"""Given two group sizes, computes a "nesting map" between groups.
         This function will produce a bipartite map between two sets of "group nodes"
         that will be used downstream to partition nodes in a bigger graph. The map
         encodes which groups from the larger set are nested in certain groups from
@@ -243,8 +239,7 @@ class StochasticBlockModelGraph(GraphGenerator):
                 pos += 1
         return nesting_map
 
-    def _ComputeExpectedEdgeCounts(self, num_edges, num_vertices,
-                                   pi,
+    def _ComputeExpectedEdgeCounts(self, num_edges,
                                    prop_mat):
         """Computes expected edge counts within and between communities.
         Args:
@@ -257,12 +252,12 @@ class StochasticBlockModelGraph(GraphGenerator):
         Returns:
           symmetric matrix with shape prop_mat.shape giving expected edge counts.
         """
-        scale = np.matmul(pi, np.matmul(prop_mat, pi)) * num_vertices ** 2
+        scale = np.matmul(self.pi, np.matmul(prop_mat, self.pi)) * self.num_nodes ** 2
         prob_mat = prop_mat * num_edges / scale
-        return np.outer(pi, pi) * prob_mat * num_vertices ** 2
+        return np.outer(self.pi, self.pi) * prob_mat * self.num_nodes ** 2
 
-    def _compute_community_sizes(self, num_vertices, pi):
-        """Helper function of GenerateNodeMemberships to compute group sizes.
+    def _compute_community_sizes(self):
+        r"""Helper function of GenerateNodeMemberships to compute group sizes.
         Args:
           num_vertices: number of nodes in graph.
           pi: interable of non-zero community size proportions.
@@ -273,10 +268,10 @@ class StochasticBlockModelGraph(GraphGenerator):
             group sizes as balanced as possible (i.e. increasing smallest groups by
             1 or decreasing largest groups by 1 if needed).
         """
-        community_sizes = [int(x * num_vertices) for x in pi]
-        if sum(community_sizes) != num_vertices:
+        community_sizes = [int(x * self.num_nodes) for x in self.pi]
+        if sum(community_sizes) != self.num_nodes:
             size_order = np.argsort(community_sizes)
-            delta = sum(community_sizes) - num_vertices
+            delta = sum(community_sizes) - self.num_nodes
             adjustment = np.sign(delta)
             if adjustment == 1:
                 size_order = np.flip(size_order)
@@ -285,7 +280,7 @@ class StochasticBlockModelGraph(GraphGenerator):
         return community_sizes
 
     def _generate_node_memberships(
-            self, num_vertices,pi):
+            self):
         """Gets node memberships for sbm.
         Args:
           num_vertices: number of nodes in graph.
@@ -294,10 +289,10 @@ class StochasticBlockModelGraph(GraphGenerator):
         Returns:
           np vector of ints representing community indices.
         """
-        community_sizes = self._compute_community_sizes(num_vertices, pi)
-        memberships = np.zeros(num_vertices, dtype=int)
+        community_sizes = self._compute_community_sizes()
+        memberships = np.zeros(self.num_nodes, dtype=int)
         node = 0
-        for i in range(len(pi)):
+        for i in range(len(self.pi)):
             memberships[range(node, node + community_sizes[i])] = i
             node += community_sizes[i]
         return memberships
@@ -369,10 +364,17 @@ class GraphWorld:
             np.random.seed(seed)
 
 
-    # Helper function to create the "PropMat" matrix for the SBM model (square
-    # matrix giving inter-community Poisson means) from the config parameters,
-    # particularly `p_to_q_ratio`. See the config proto for details.
     def make_prop_matrix(self, num_clusters: int, p_to_q_ratio: float) -> np.ndarray:
+        r"""
+        Helper function to create the square matrix giving inter-community Poisson means
+        for the SBM model from the config parameters
+        Args:
+            num_clusters:
+            p_to_q_ratio:
+
+        Returns:
+
+        """
         prop_mat = np.ones((num_clusters, num_clusters))
         np.fill_diagonal(prop_mat, p_to_q_ratio)
         prop_mat = prop_mat / np.max(prop_mat)
@@ -387,7 +389,12 @@ class GraphWorld:
         pi /= np.sum(pi)
         return pi
 
-    def generate_config(self):
+    def generate_config(self) -> List[Dict]:
+        r"""
+        Generate a set of parameters, each of which corresponds to one generated SBM graph
+        Returns:
+            List of configs(dict)
+        """
         config = {}
         for param_name, spec in self.generator_params.items():
             min_value = spec['min']
@@ -425,7 +432,11 @@ class GraphWorld:
         ]
         configs = []
         for idx in range(self.num_samples):
-            configs.append({k: v[idx] for k, v in config.items()})
+            block_size_proportion_matrix = self.make_block_size_proportions(
+                num_clusters[idx], cluster_size_slope[idx])
+            configs.append({
+                'pi':block_size_proportion_matrix,
+                **{k: v[idx] for k, v in config.items()}})
 
         return configs
 
